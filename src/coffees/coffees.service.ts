@@ -1,60 +1,78 @@
-import { HttpException, HttpStatus, Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, NotFoundException } from '@nestjs/common';
+import { InjectConnection, InjectModel } from '@nestjs/mongoose';
+import { Connection, Model } from 'mongoose';
+import { PaginationQueryDto } from '../common/dto/pagination-query.dto';
+import { Event } from '../events/entities/event.entity';
+import { CreateCoffeeDto } from './dto/create-coffee.dto';
+import { UpdateCoffeeDto } from './dto/update-coffee.dto';
 import { Coffee } from './entities/coffee.entity';
 
 @Injectable()
 export class CoffeesService {
-    private coffees : Coffee[] = [
-        {
-            id: 1,
-            name: "1 coffee",
-            brand: "1 brand",
-            flavors: ['shokoladi','vanili']
-        },
-        {
-            id: 2,
-            name: "2 coffee",
-            brand: "2 brand",
-            flavors: ['shokoladi','vanili']
-        },
-        {
-            id: 3,
-            name: "3 coffee",
-            brand: "3 brand",
-            flavors: ['shokoladi','vanili']
-        }
-    ];
+    constructor(
+        @InjectModel(Coffee.name) private readonly coffeeModel: Model<Coffee>,
+        @InjectConnection() private readonly connection: Connection,
+        @InjectModel(Event.name) private readonly eventModel: Model<Event>,
+    ) { }
 
-    index(){
-        return this.coffees;
+    findAll(paginationQuery: PaginationQueryDto) {
+        const { limit, offset } = paginationQuery;
+        return this.coffeeModel
+            .find()
+            .skip(offset)
+            .limit(limit)
+            .exec();
     }
 
-    show(id: string) {
-        const coffee = this.coffees.find((item) => item.id === +id);
-
-        if(!coffee){
-            //throw new HttpException('Coffee not found', HttpStatus.NOT_FOUND);
-            throw new NotFoundException('Coffee not found');
+    async findOne(id: string) {
+        const coffee = await this.coffeeModel.findOne({ _id: id }).exec();
+        if (!coffee) {
+            throw new NotFoundException(`Coffee #${id} not found`);
         }
-
         return coffee;
     }
 
-    create(createCoffeeDto) {
-        this.coffees.push(createCoffeeDto);
-        return createCoffeeDto;
+    create(createCoffeeDto: CreateCoffeeDto) {
+        const coffee = new this.coffeeModel(createCoffeeDto);
+        return coffee.save();
     }
 
-    update(id: string, updateCoffeeDto) {
-        const coffee = this.show(id);
+    async update(id: string, updateCoffeeDto: UpdateCoffeeDto) {
+        const existingCoffee = await this.coffeeModel
+            .findOneAndUpdate({ _id: id }, { $set: updateCoffeeDto }, { new: true })
+            .exec();
 
-        if(coffee){
-            return id;
+        if (!existingCoffee) {
+            throw new NotFoundException(`Coffee #${id} not found`);
         }
-
-        // update goes here
+        return existingCoffee;
     }
 
-    delete(id: string) {
-        // deleteing goes here
+    async remove(id: string) {
+        const coffee = await this.findOne(id);
+        return coffee.deleteOne();
+    }
+
+    async recommendCoffee(coffee: Coffee) {
+        const session = await this.connection.startSession();
+        session.startTransaction();
+
+        try {
+            coffee.recommendations++;
+
+            const recommendEvent = new this.eventModel({
+                name: 'recommend_coffee',
+                type: 'coffee',
+                payload: { coffeeId: coffee.id },
+            });
+            await recommendEvent.save({ session });
+            await coffee.save({ session });
+
+            await session.commitTransaction();
+        } catch (err) {
+            await session.abortTransaction();
+        } finally {
+            session.endSession();
+        }
     }
 }
